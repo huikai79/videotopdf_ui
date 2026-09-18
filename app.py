@@ -71,6 +71,7 @@ def detect_unique_screenshots(video_path, output_folder_screenshot_path, progres
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.release()
+    progress_denominator = max(total_frames, 1)
 
     screenshoots_count = 0
     last_screenshot = None
@@ -80,7 +81,7 @@ def detect_unique_screenshots(video_path, output_folder_screenshot_path, progres
     
     for frame_count, frame_time, frame in get_frames(video_path):
         # Update progress
-        progress((frame_count / total_frames) * 0.7, desc=f"处理视频帧 {frame_count}/{total_frames}")
+        progress((frame_count / progress_denominator) * 0.7, desc=f"处理视频帧 {frame_count}/{total_frames or '?'}")
         
         orig = frame.copy()
         frame = imutils.resize(frame, width=600)
@@ -104,7 +105,8 @@ def detect_unique_screenshots(video_path, output_folder_screenshot_path, progres
                 try:
                     progress(0.7 + (screenshoots_count * 0.1), desc=f"保存截图 {screenshoots_count + 1}")
                     print("saving {}".format(path))
-                    cv2.imwrite(str(path), orig)
+                    if not cv2.imwrite(str(path), orig):
+                        raise OSError(f"Unable to write screenshot: {path}")
                     last_screenshot = orig
                     saved_files.append(path)
                     screenshoots_count += 1
@@ -261,25 +263,63 @@ def extract_audio_and_transcribe(video_path, progress=gr.Progress()):
         except FileNotFoundError:
             pass
 
+def load_caption_font(font_size):
+    """Load a Unicode-capable font when available, with a portable fallback."""
+    candidates = [
+        os.environ.get("VIDEOTOPDF_FONT"),
+        "arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            return ImageFont.truetype(candidate, font_size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
 def add_text_to_image(image_path, text):
-    """Add text below the image"""
-    # Open image
-    img = Image.open(image_path)
+    """Add a caption below an image without requiring a platform-specific font."""
+    with Image.open(image_path) as source:
+        img = source.convert("RGB")
+
     width, height = img.size
-    
-    # Create new image with space for text
     font_size = 30
-    font = ImageFont.truetype("arial.ttf", font_size)
-    text_height = font_size * (text.count('\n') + 2)  # Add padding
-    
-    new_img = Image.new('RGB', (width, height + text_height), 'white')
+    font = load_caption_font(font_size)
+
+    # Estimate wrapping from image width rather than relying on newlines only.
+    max_chars = max(20, width // max(font_size // 2, 1))
+    words = str(text).split()
+    lines = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if current and len(candidate) > max_chars:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    if not lines:
+        lines = [""]
+
+    line_height = font_size + 8
+    padding = 12
+    text_height = padding * 2 + line_height * len(lines)
+
+    new_img = Image.new("RGB", (width, height + text_height), "white")
     new_img.paste(img, (0, 0))
-    
-    # Add text
     draw = ImageDraw.Draw(new_img)
-    draw.text((10, height + 10), text, font=font, fill='black')
-    
-    # Save the modified image
+
+    y = height + padding
+    for line in lines:
+        draw.text((padding, y), line, font=font, fill="black")
+        y += line_height
+
     new_img.save(image_path)
 
 def process_video_with_transcription(video_path, output_folder_screenshot_path, progress=gr.Progress()):
