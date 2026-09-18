@@ -1,1 +1,26 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Local environment / secrets
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Node artifacts (kept for compatibility with earlier experiments)
 node_modules/
+
+# Generated conversion artifacts
+*.tmp
+*.log
