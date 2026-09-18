@@ -24,3 +24,7 @@ node_modules/
 # Generated conversion artifacts
 *.tmp
 *.log
+output/
+*.wav
+temp_video_*
+videotopdf_*
