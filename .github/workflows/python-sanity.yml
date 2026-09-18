@@ -1,0 +1,33 @@
+name: Python sanity
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compile Python sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m py_compile app.py asr.py ocrapi.py readpdf.py testocr.py
+          if [ -f "app copy.py" ]; then
+            python -m py_compile "app copy.py"
+          fi
