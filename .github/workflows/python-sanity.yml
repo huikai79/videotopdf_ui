@@ -27,7 +27,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m py_compile app.py asr.py ocrapi.py readpdf.py testocr.py
+          python -m py_compile app.py asr.py ocrapi.py readpdf.py testocr.py pipeline_utils.py
           if [ -f "app copy.py" ]; then
             python -m py_compile "app copy.py"
           fi
+
+      - name: Run lightweight unit tests
+        run: python -m unittest discover -s tests -p "test_*.py" -v
