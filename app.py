@@ -11,6 +11,7 @@ import tempfile
 import whisper
 from moviepy.editor import VideoFileClip
 from PIL import Image, ImageDraw, ImageFont
+from pipeline_utils import materialize_uploaded_video, safe_output_stem
 
 ############# Define constants
 
@@ -70,6 +71,7 @@ def detect_unique_screenshots(video_path, output_folder_screenshot_path, progres
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.release()
+    progress_denominator = max(total_frames, 1)
 
     screenshoots_count = 0
     last_screenshot = None
@@ -79,7 +81,7 @@ def detect_unique_screenshots(video_path, output_folder_screenshot_path, progres
     
     for frame_count, frame_time, frame in get_frames(video_path):
         # Update progress
-        progress((frame_count / total_frames) * 0.7, desc=f"处理视频帧 {frame_count}/{total_frames}")
+        progress((frame_count / progress_denominator) * 0.7, desc=f"处理视频帧 {frame_count}/{total_frames or '?'}")
         
         orig = frame.copy()
         frame = imutils.resize(frame, width=600)
@@ -103,7 +105,8 @@ def detect_unique_screenshots(video_path, output_folder_screenshot_path, progres
                 try:
                     progress(0.7 + (screenshoots_count * 0.1), desc=f"保存截图 {screenshoots_count + 1}")
                     print("saving {}".format(path))
-                    cv2.imwrite(str(path), orig)
+                    if not cv2.imwrite(str(path), orig):
+                        raise OSError(f"Unable to write screenshot: {path}")
                     last_screenshot = orig
                     saved_files.append(path)
                     screenshoots_count += 1
@@ -123,9 +126,7 @@ def detect_unique_screenshots(video_path, output_folder_screenshot_path, progres
 def initialize_output_folder(video_path):
     '''Clean the output folder if already exists'''
     # Create a safe folder name from video filename
-    video_filename = os.path.splitext(os.path.basename(video_path))[0]
-    # Replace potentially problematic characters
-    safe_filename = "".join(x for x in video_filename if x.isalnum() or x in (' ', '-', '_'))
+    safe_filename = safe_output_stem(video_path)
     output_folder_screenshot_path = os.path.join(OUTPUT_SLIDES_DIR, safe_filename)
 
     if os.path.exists(output_folder_screenshot_path):
@@ -138,8 +139,7 @@ def initialize_output_folder(video_path):
 
 def convert_screenshots_to_pdf(video_path, output_folder_screenshot_path):
     # Create a safe filename
-    video_filename = os.path.splitext(os.path.basename(video_path))[0]
-    safe_filename = "".join(x for x in video_filename if x.isalnum() or x in (' ', '-', '_'))
+    safe_filename = safe_output_stem(video_path)
     output_pdf_path = os.path.join(OUTPUT_SLIDES_DIR, f"{safe_filename}.pdf")
     
     try:
@@ -171,8 +171,7 @@ def video_to_slides(video_path, progress=gr.Progress()):
 
 
 def slides_to_pdf(video_path, output_folder_screenshot_path, saved_files, progress=gr.Progress()):
-    video_filename = os.path.splitext(os.path.basename(video_path))[0]
-    safe_filename = "".join(x for x in video_filename if x.isalnum() or x in (' ', '-', '_'))
+    safe_filename = safe_output_stem(video_path)
     output_pdf_path = os.path.join(OUTPUT_SLIDES_DIR, f"{safe_filename}.pdf")
     
     try:
@@ -212,98 +211,115 @@ def run_app(video_path, progress=gr.Progress()):
 
 
 def process_video_file(video_file):
-    """Handle uploaded video file and return PDF"""
+    """Handle an uploaded video file and return the generated PDF."""
     try:
-        # If video_file is a string (path), use it directly
         if isinstance(video_file, str):
-            if video_file.strip() == "":
+            if not video_file.strip():
                 return None
             return run_app(video_file)
-            
-        # If it's an uploaded file, create a temporary file
-        if video_file is not None:
-            # Generate a unique filename for the temporary video
-            temp_filename = f"temp_video_{int(time.time())}.mp4"
-            temp_path = os.path.join(tempfile.gettempdir(), temp_filename)
-            
-            try:
-                if hasattr(video_file, 'name'):  # If it's already a file path
-                    shutil.copyfile(video_file, temp_path)
-                else:  # If it's file content
-                    with open(temp_path, 'wb') as f:
-                        f.write(video_file)
-                
-                # Process the video
-                output_folder_screenshot_path, saved_files = video_to_slides(temp_path)
-                pdf_path = slides_to_pdf(temp_path, output_folder_screenshot_path, saved_files)
-                
-                # Cleanup
-                if os.path.exists(temp_path):
-                    os.unlink(temp_path)
-                return pdf_path
-                
-            except Exception as e:
-                if os.path.exists(temp_path):
-                    os.unlink(temp_path)
-                raise gr.Error(f"处理视频时出错: {str(e)}")
-        return None
+
+        if video_file is None:
+            return None
+
+        with materialize_uploaded_video(video_file) as temp_path:
+            return run_app(temp_path)
     except Exception as e:
         raise gr.Error(f"处理视频时出错: {str(e)}")
 
 
 def extract_audio_and_transcribe(video_path, progress=gr.Progress()):
-    """Extract audio from video and transcribe it using Whisper"""
+    """Extract audio from video and transcribe it using Whisper."""
     progress(0, desc="正在提取音频...")
-    
-    # Load the video and extract audio
-    video = VideoFileClip(video_path)
-    audio = video.audio
-    
-    # Save audio to temporary file
-    temp_audio = tempfile.mktemp(suffix='.wav')
-    audio.write_audiofile(temp_audio)
-    
-    progress(0.3, desc="正在转录音频...")
-    
-    # Load Whisper model and transcribe
-    model = whisper.load_model("base")
-    result = model.transcribe(temp_audio)
-    print("完成的转录文本结果如下："+result)
-    
-    # Clean up
-    os.remove(temp_audio)
-    video.close()
-    
-    # Process segments with timestamps
-    segments = []
-    for segment in result["segments"]:
-        segments.append({
-            "start": segment["start"],
-            "end": segment["end"],
-            "text": segment["text"].strip()
-        })
-    
-    return segments
+
+    fd, temp_audio = tempfile.mkstemp(prefix="videotopdf_audio_", suffix=".wav")
+    os.close(fd)
+    video = None
+
+    try:
+        video = VideoFileClip(video_path)
+        if video.audio is None:
+            raise ValueError("视频中没有可用音轨")
+
+        video.audio.write_audiofile(temp_audio)
+
+        progress(0.3, desc="正在转录音频...")
+        model = whisper.load_model("base")
+        result = model.transcribe(temp_audio)
+        print("完成的转录文本结果如下：" + str(result.get("text", "")).strip())
+
+        segments = []
+        for segment in result.get("segments", []):
+            segments.append({
+                "start": segment["start"],
+                "end": segment["end"],
+                "text": segment["text"].strip()
+            })
+        return segments
+    finally:
+        if video is not None:
+            video.close()
+        try:
+            os.remove(temp_audio)
+        except FileNotFoundError:
+            pass
+
+def load_caption_font(font_size):
+    """Load a Unicode-capable font when available, with a portable fallback."""
+    candidates = [
+        os.environ.get("VIDEOTOPDF_FONT"),
+        "arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            return ImageFont.truetype(candidate, font_size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
 
 def add_text_to_image(image_path, text):
-    """Add text below the image"""
-    # Open image
-    img = Image.open(image_path)
+    """Add a caption below an image without requiring a platform-specific font."""
+    with Image.open(image_path) as source:
+        img = source.convert("RGB")
+
     width, height = img.size
-    
-    # Create new image with space for text
     font_size = 30
-    font = ImageFont.truetype("arial.ttf", font_size)
-    text_height = font_size * (text.count('\n') + 2)  # Add padding
-    
-    new_img = Image.new('RGB', (width, height + text_height), 'white')
+    font = load_caption_font(font_size)
+
+    # Estimate wrapping from image width rather than relying on newlines only.
+    max_chars = max(20, width // max(font_size // 2, 1))
+    words = str(text).split()
+    lines = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if current and len(candidate) > max_chars:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    if not lines:
+        lines = [""]
+
+    line_height = font_size + 8
+    padding = 12
+    text_height = padding * 2 + line_height * len(lines)
+
+    new_img = Image.new("RGB", (width, height + text_height), "white")
     new_img.paste(img, (0, 0))
-    
-    # Add text
     draw = ImageDraw.Draw(new_img)
-    draw.text((10, height + 10), text, font=font, fill='black')
-    
-    # Save the modified image
+
+    y = height + padding
+    for line in lines:
+        draw.text((padding, y), line, font=font, fill="black")
+        y += line_height
+
     new_img.save(image_path)
 
 def process_video_with_transcription(video_path, output_folder_screenshot_path, progress=gr.Progress()):
@@ -348,42 +364,18 @@ def run_app_with_transcription(video_path, progress=gr.Progress()):
         raise gr.Error(f"处理失败: {str(e)}")
 
 def process_video_file_with_transcription(video_file):
-    """Handle uploaded video file and return PDF with transcription"""
+    """Handle an uploaded video file and return a PDF with transcription."""
     try:
-        # If video_file is a string (path), use it directly
         if isinstance(video_file, str):
-            if video_file.strip() == "":
+            if not video_file.strip():
                 return None
             return run_app_with_transcription(video_file)
-            
-        # If it's an uploaded file, create a temporary file
-        if video_file is not None:
-            # Generate a unique filename for the temporary video
-            temp_filename = f"temp_video_{int(time.time())}.mp4"
-            temp_path = os.path.join(tempfile.gettempdir(), temp_filename)
-            
-            try:
-                if hasattr(video_file, 'name'):  # If it's already a file path
-                    shutil.copyfile(video_file, temp_path)
-                else:  # If it's file content
-                    with open(temp_path, 'wb') as f:
-                        f.write(video_file)
-                
-                # Process the video
-                output_folder_screenshot_path, saved_files = video_to_slides(temp_path)
-                saved_files = process_video_with_transcription(temp_path, output_folder_screenshot_path)
-                pdf_path = slides_to_pdf(temp_path, output_folder_screenshot_path, saved_files)
-                
-                # Cleanup
-                if os.path.exists(temp_path):
-                    os.unlink(temp_path)
-                return pdf_path
-                
-            except Exception as e:
-                if os.path.exists(temp_path):
-                    os.unlink(temp_path)
-                raise gr.Error(f"处理视频时出错: {str(e)}")
-        return None
+
+        if video_file is None:
+            return None
+
+        with materialize_uploaded_video(video_file) as temp_path:
+            return run_app_with_transcription(temp_path)
     except Exception as e:
         raise gr.Error(f"处理视频时出错: {str(e)}")
 
